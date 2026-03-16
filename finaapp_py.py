@@ -2,7 +2,11 @@
 import os
 import unicodedata
 import streamlit as st
-from mistralai import Mistral
+from dotenv import load_dotenv
+from mistralai.client import Mistral
+
+# Load `.env` file (ignored by git) for local development
+load_dotenv()
 
 st.set_page_config(page_title="Financial Advisor Bot", page_icon="💰")
 
