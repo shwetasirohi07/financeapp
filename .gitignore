@@ -50,3 +50,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# User database (contains credentials — never commit)
+users.db
+users.json.migrated
