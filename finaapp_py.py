@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
+import hashlib
+import http.client
 import os
 import re
+import sqlite3
+import time
 import unicodedata
+from pathlib import Path
+from typing import Callable
+
 import streamlit as st
 from dotenv import load_dotenv
 from mistralai.client import Mistral
@@ -183,6 +190,10 @@ st.markdown(
         border-radius: 28px;
         padding: 1.35rem;
         box-shadow: 0 18px 40px rgba(17, 60, 58, 0.24);
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        min-height: 100%;
     }
 
     .stat-card::after {
@@ -235,6 +246,23 @@ st.markdown(
     .hero-action button:hover {
         border-color: rgba(219, 109, 87, 0.35);
         transform: translateY(-1px);
+    }
+
+    .hero-panel-copy {
+        margin-top: 0.9rem;
+    }
+
+    .hero-panel-actions {
+        margin-top: 1rem;
+        display: grid;
+        gap: 0.65rem;
+    }
+
+    .hero-panel-actions .stButton > button {
+        min-height: 58px;
+        border-radius: 16px;
+        white-space: normal;
+        line-height: 1.35;
     }
 
     .market-strip {
@@ -492,19 +520,554 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---- Helpers ----
+USER_DB_PATH = Path("users.db")
+LEGACY_USER_DB_PATH = Path("users.json")
+DEFAULT_MODEL = "mistral-large-latest"
+DEFAULT_SYSTEM_PROMPT = """You are a helpful financial advisor assistant.
+Provide advice on budgeting, investing, savings, and personal finance.
+Keep answers clear and practical. Always mention this is educational, not professional financial advice."""
 
 
-def normalize_text(s: str) -> str:
-    """Normalize text to handle smart quotes and unicode issues"""
-    if not isinstance(s, str):
-        return s
-    # Replace smart quotes and normalize to NFC
-    s = (s.replace("\u2019", "'")
-         .replace("\u2018", "'")
-         .replace("\u201C", '"')
-         .replace("\u201D", '"'))
-    return unicodedata.normalize("NFC", s)
+def hash_password(password: str, salt: str) -> str:
+    """Create a deterministic password hash using SHA-256 and a per-user salt."""
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+@st.cache_resource(show_spinner=False)
+def initialize_auth_storage() -> str | None:
+    """Initialize persistent auth storage once per app process."""
+    ensure_user_table()
+    return migrate_legacy_users()
+
+
+@st.cache_resource(show_spinner=False)
+def get_mistral_client(api_key: str) -> Mistral:
+    """Create and cache the Mistral client per API key."""
+    return Mistral(api_key=api_key)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def check_mistral_connectivity() -> tuple[bool, str]:
+    """Perform a lightweight upstream connectivity check."""
+    connection = http.client.HTTPSConnection("api.mistral.ai", timeout=5)
+    try:
+        connection.request("HEAD", "/")
+        response = connection.getresponse()
+        if response.status < 500:
+            return True, "Mistral service reachable"
+        return False, f"Mistral service returned status {response.status}"
+    except OSError:
+        return False, "Network connection to Mistral is unavailable"
+    finally:
+        connection.close()
+
+
+def validate_api_key_format(api_key: str) -> tuple[bool, str]:
+    """Run cheap local validation before hitting the upstream service."""
+    clean_key = api_key.strip()
+    if len(clean_key) < 20:
+        return False, "The MISTRAL_API_KEY looks too short. Check the full key and try again."
+    if any(ch.isspace() for ch in clean_key):
+        return False, "The MISTRAL_API_KEY contains spaces or line breaks. Paste the exact key value only."
+    return True, "API key format looks valid"
+
+
+def build_service_status(api_key: str) -> tuple[bool, str]:
+    """Summarize whether the app is ready to send live AI requests."""
+    key_ok, key_message = validate_api_key_format(api_key)
+    if not key_ok:
+        return False, key_message
+
+    connectivity_ok, connectivity_message = check_mistral_connectivity()
+    if not connectivity_ok:
+        return False, connectivity_message
+
+    return True, "AI service is ready"
+
+
+def should_enable_live_ai(api_key: str) -> tuple[bool, str]:
+    """Expose service readiness as a small testable decision helper."""
+    return build_service_status(api_key)
+
+
+def get_db_connection() -> sqlite3.Connection:
+    """Open a SQLite connection for local authentication storage."""
+    connection = sqlite3.connect(USER_DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def ensure_user_table() -> None:
+    """Create the local users table if it does not already exist."""
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                email TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                is_verified INTEGER NOT NULL DEFAULT 0,
+                verification_code TEXT,
+                reset_code TEXT
+            )
+            """
+        )
+        connection.commit()
+
+
+def migrate_legacy_users() -> str | None:
+    """Import users from the legacy JSON store into SQLite once when available."""
+    if not LEGACY_USER_DB_PATH.exists():
+        return None
+
+    try:
+        legacy_payload = LEGACY_USER_DB_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return "Legacy users.json was found but could not be read."
+
+    if not legacy_payload.strip():
+        return None
+
+    try:
+        import json
+        legacy_users = json.loads(legacy_payload)
+    except json.JSONDecodeError:
+        return "Legacy users.json was found but is not valid JSON."
+
+    if not isinstance(legacy_users, dict) or not legacy_users:
+        return None
+
+    migrated_count = 0
+    with get_db_connection() as connection:
+        for email, user in legacy_users.items():
+            if not isinstance(user, dict):
+                continue
+
+            clean_email = str(email).strip().lower()
+            if not clean_email or fetch_user(clean_email):
+                continue
+
+            name = str(user.get("name", clean_email)).strip() or clean_email
+            salt = user.get("salt")
+            password_hash = user.get("password_hash")
+            if not salt or not password_hash:
+                continue
+
+            connection.execute(
+                """
+                INSERT INTO users (email, name, salt, password_hash, is_verified, verification_code, reset_code)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_email,
+                    name,
+                    str(salt),
+                    str(password_hash),
+                    int(bool(user.get("is_verified", False))),
+                    user.get("verification_code"),
+                    user.get("reset_code"),
+                ),
+            )
+            migrated_count += 1
+        connection.commit()
+
+    if migrated_count:
+        backup_path = LEGACY_USER_DB_PATH.with_suffix(".json.migrated")
+        try:
+            LEGACY_USER_DB_PATH.rename(backup_path)
+        except OSError:
+            return f"Migrated {migrated_count} account(s) from users.json into users.db."
+        return f"Migrated {migrated_count} account(s) from users.json into users.db and renamed the legacy file to {backup_path.name}."
+
+    return None
+
+
+def fetch_user(email: str) -> dict | None:
+    """Fetch a single user record from SQLite."""
+    with get_db_connection() as connection:
+        row = connection.execute(
+            "SELECT email, name, salt, password_hash, is_verified, verification_code, reset_code FROM users WHERE email = ?",
+            (email,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "email": row["email"],
+        "name": row["name"],
+        "salt": row["salt"],
+        "password_hash": row["password_hash"],
+        "is_verified": bool(row["is_verified"]),
+        "verification_code": row["verification_code"],
+        "reset_code": row["reset_code"],
+    }
+
+
+def create_user_record(email: str, name: str, salt: str, password_hash: str, verification_code: str) -> None:
+    """Insert a newly created user into SQLite."""
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            INSERT INTO users (email, name, salt, password_hash, is_verified, verification_code, reset_code)
+            VALUES (?, ?, ?, ?, 0, ?, NULL)
+            """,
+            (email, name, salt, password_hash, verification_code),
+        )
+        connection.commit()
+
+
+def update_user_codes(email: str, verification_code: str | None = None, reset_code: str | None = None, is_verified: bool | None = None) -> None:
+    """Update code or verification fields for an existing user."""
+    user = fetch_user(email)
+    if not user:
+        return
+    next_verification_code = user["verification_code"] if verification_code is None else verification_code
+    next_reset_code = user["reset_code"] if reset_code is None else reset_code
+    next_is_verified = user["is_verified"] if is_verified is None else is_verified
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            UPDATE users
+            SET verification_code = ?, reset_code = ?, is_verified = ?
+            WHERE email = ?
+            """,
+            (next_verification_code, next_reset_code, int(next_is_verified), email),
+        )
+        connection.commit()
+
+
+def update_user_password(email: str, salt: str, password_hash: str) -> None:
+    """Update password credentials for an existing user."""
+    with get_db_connection() as connection:
+        connection.execute(
+            """
+            UPDATE users
+            SET salt = ?, password_hash = ?, reset_code = NULL
+            WHERE email = ?
+            """,
+            (salt, password_hash, email),
+        )
+        connection.commit()
+
+
+def create_reset_code() -> str:
+    """Generate a short numeric code for local verification and reset flows."""
+    return f"{int.from_bytes(os.urandom(3), 'big') % 1_000_000:06d}"
+
+
+def mask_email(email: str) -> str:
+    """Return a masked email for displaying local verification or reset codes."""
+    local_part, _, domain = email.partition("@")
+    if len(local_part) <= 2:
+        masked_local = local_part[:1] + "*" * max(len(local_part) - 1, 0)
+    else:
+        masked_local = f"{local_part[0]}{'*' * (len(local_part) - 2)}{local_part[-1]}"
+    return f"{masked_local}@{domain}"
+
+
+def verify_user(email: str, code: str) -> tuple[bool, str]:
+    """Verify a user email using the locally stored verification code."""
+    clean_email = email.strip().lower()
+    user = fetch_user(clean_email)
+    if not user:
+        return False, "No account found for that email."
+    if user.get("is_verified"):
+        return True, "Email is already verified."
+    if code.strip() != user.get("verification_code"):
+        return False, "Verification code is incorrect."
+
+    update_user_codes(clean_email, verification_code="", is_verified=True)
+    return True, "Email verified. You can sign in now."
+
+
+def create_reset_request(email: str) -> tuple[bool, str]:
+    """Generate a local password reset code for an existing account."""
+    clean_email = email.strip().lower()
+    user = fetch_user(clean_email)
+    if not user:
+        return False, "No account found for that email."
+
+    reset_code = create_reset_code()
+    update_user_codes(clean_email, reset_code=reset_code)
+    return True, f"Reset code for {mask_email(clean_email)}: {reset_code}"
+
+
+def reset_password(email: str, code: str, new_password: str, confirm_password: str) -> tuple[bool, str]:
+    """Reset a user's password after validating a stored reset code."""
+    clean_email = email.strip().lower()
+    user = fetch_user(clean_email)
+    if not user:
+        return False, "No account found for that email."
+    if code.strip() != user.get("reset_code"):
+        return False, "Reset code is incorrect."
+    if len(new_password) < 8:
+        return False, "Password must be at least 8 characters long."
+    if new_password != confirm_password:
+        return False, "Passwords do not match."
+
+    salt = os.urandom(16).hex()
+    update_user_password(clean_email, salt, hash_password(new_password, salt))
+    return True, "Password updated. Please sign in with the new password."
+
+
+def initialize_session_state() -> None:
+    """Initialize required Streamlit session state values."""
+    st.session_state.setdefault(
+        "messages", [{"role": "system", "content": SYSTEM_PROMPT}])
+    st.session_state.setdefault("queued_prompt", None)
+    st.session_state.setdefault("auth_mode", "login")
+    st.session_state.setdefault("authenticated", False)
+    st.session_state.setdefault("current_user", None)
+    st.session_state.setdefault("auth_notice", None)
+
+
+def reset_chat_state() -> None:
+    """Reset chat-specific session state while keeping authentication values."""
+    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    st.session_state.queued_prompt = None
+
+
+def generate_assistant_reply(client: Mistral, messages: list[dict]) -> str:
+    """Call Mistral with bounded retries and clear fallback errors."""
+    retry_delays = [0.6, 1.2]
+    last_error = None
+
+    for attempt_index in range(len(retry_delays) + 1):
+        try:
+            response = client.chat.complete(
+                model=MODEL,
+                messages=[
+                    {"role": item["role"],
+                        "content": normalize_text(item["content"])}
+                    for item in messages
+                ],
+                temperature=0.7,
+                max_tokens=500,
+                timeout_ms=20000,
+            )
+            return normalize_text(response.choices[0].message.content)
+        except Exception as exc:
+            last_error = normalize_text(str(exc))
+            if attempt_index < len(retry_delays):
+                time.sleep(retry_delays[attempt_index])
+
+    lowered_error = (last_error or "").lower()
+    if "timeout" in lowered_error or "timed out" in lowered_error:
+        return "I could not get a response from the AI service in time. Please try again in a few seconds, or ask a shorter question."
+    if "unauthorized" in lowered_error or "api key" in lowered_error or "authentication" in lowered_error:
+        return "The AI service rejected the request. Check that your MISTRAL_API_KEY is valid and try again."
+    if "rate" in lowered_error or "429" in lowered_error or "quota" in lowered_error:
+        return "The AI service is currently rate limiting requests. Wait a moment and try again."
+    return "The AI service is temporarily unavailable. Please try again shortly. If the issue continues, verify your network connection and API key."
+
+
+def bootstrap_runtime(api_key: str) -> tuple[Mistral, bool, str, str | None]:
+    """Prepare cached runtime dependencies and status for the app."""
+    client = get_mistral_client(api_key)
+    service_ready, service_status_message = should_enable_live_ai(api_key)
+    migration_notice = initialize_auth_storage()
+    return client, service_ready, service_status_message, migration_notice
+
+
+def append_message(messages: list[dict], role: str, content: str) -> list[dict]:
+    """Return an updated message list with one appended message."""
+    next_messages = list(messages)
+    next_messages.append({"role": role, "content": content})
+    return next_messages
+
+
+def signup_user(name: str, email: str, password: str, confirm_password: str) -> tuple[bool, str]:
+    """Create a new local user account after validation."""
+    clean_name = name.strip()
+    clean_email = email.strip().lower()
+
+    if len(clean_name) < 2:
+        return False, "Name must be at least 2 characters long."
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", clean_email):
+        return False, "Enter a valid email address."
+    if len(password) < 8:
+        return False, "Password must be at least 8 characters long."
+    if password != confirm_password:
+        return False, "Passwords do not match."
+
+    if fetch_user(clean_email):
+        return False, "An account with this email already exists."
+
+    salt = os.urandom(16).hex()
+    verification_code = create_reset_code()
+    create_user_record(
+        clean_email,
+        clean_name,
+        salt,
+        hash_password(password, salt),
+        verification_code,
+    )
+    return True, f"Account created. Verify email with code for {mask_email(clean_email)}: {verification_code}"
+
+
+def login_user(email: str, password: str) -> tuple[bool, str]:
+    """Authenticate a user against the local credential store."""
+    clean_email = email.strip().lower()
+    user = fetch_user(clean_email)
+    if not user:
+        return False, "No account found for that email."
+    if not user.get("is_verified"):
+        return False, "Email not verified yet. Use Verify Email before signing in."
+
+    expected_hash = hash_password(password, user["salt"])
+    if expected_hash != user["password_hash"]:
+        return False, "Incorrect password."
+
+    st.session_state.authenticated = True
+    st.session_state.current_user = {
+        "email": clean_email,
+        "name": user.get("name", clean_email),
+        "is_verified": user.get("is_verified", False),
+    }
+    reset_chat_state()
+    return True, f"Welcome back, {st.session_state.current_user['name']}."
+
+
+def logout_user() -> None:
+    """Log out the current user and clear chat data."""
+    st.session_state.authenticated = False
+    st.session_state.current_user = None
+    reset_chat_state()
+
+
+def render_auth_screen() -> None:
+    """Render login and sign-up options before access to the app."""
+    st.markdown(
+        """
+        <section class="hero-shell">
+            <div class="hero-grid">
+                <div class="hero-stack">
+                    <div>
+                        <div class="eyebrow">Secure Entry</div>
+                        <h1 class="hero-title">Access your <span class="headline-accent">finance studio</span>.</h1>
+                        <p class="hero-subtitle">
+                            Create an account or sign in to keep your financial conversations tied to your own session.
+                        </p>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div>
+                        <div class="stat-label">Private access</div>
+                        <div class="stat-value">Login</div>
+                        <div class="stat-copy hero-panel-copy">Credentials are stored locally in this app workspace with hashed passwords.</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    toggle_left, toggle_right = st.columns(2)
+    with toggle_left:
+        if st.button("Login", use_container_width=True, type="primary" if st.session_state.auth_mode == "login" else "secondary"):
+            st.session_state.auth_mode = "login"
+    with toggle_right:
+        if st.button("Sign Up", use_container_width=True, type="primary" if st.session_state.auth_mode == "signup" else "secondary"):
+            st.session_state.auth_mode = "signup"
+
+    if st.session_state.auth_notice:
+        st.info(st.session_state.auth_notice)
+
+    if st.session_state.auth_mode == "login":
+        with st.form("login_form", clear_on_submit=False):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button(
+                "Sign In", use_container_width=True)
+            if submitted:
+                success, message = login_user(email, password)
+                if success:
+                    st.session_state.auth_notice = None
+                    st.success(message)
+                    st.rerun()
+                st.error(message)
+    else:
+        with st.form("signup_form", clear_on_submit=True):
+            name = st.text_input("Full Name")
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            confirm_password = st.text_input(
+                "Confirm Password", type="password")
+            submitted = st.form_submit_button(
+                "Create Account", use_container_width=True)
+            if submitted:
+                success, message = signup_user(
+                    name, email, password, confirm_password)
+                if success:
+                    st.session_state.auth_mode = "login"
+                    st.session_state.auth_notice = message
+                    st.success(
+                        "Account created. Complete email verification below.")
+                else:
+                    st.error(message)
+
+    utility_col_left, utility_col_right = st.columns(2)
+    with utility_col_left:
+        with st.expander("Verify Email", expanded=False):
+            with st.form("verify_email_form", clear_on_submit=True):
+                verify_email_value = st.text_input(
+                    "Email", key="verify_email_value")
+                verify_code_value = st.text_input(
+                    "Verification Code", key="verify_code_value")
+                verify_submitted = st.form_submit_button(
+                    "Verify", use_container_width=True)
+                if verify_submitted:
+                    success, message = verify_user(
+                        verify_email_value, verify_code_value)
+                    if success:
+                        st.session_state.auth_notice = None
+                        st.success(message)
+                    else:
+                        st.error(message)
+
+    with utility_col_right:
+        with st.expander("Reset Password", expanded=False):
+            request_tab, reset_tab = st.tabs(["Get Code", "Use Code"])
+            with request_tab:
+                with st.form("request_reset_form", clear_on_submit=False):
+                    reset_email_value = st.text_input(
+                        "Email", key="reset_email_value")
+                    request_submitted = st.form_submit_button(
+                        "Generate Reset Code", use_container_width=True)
+                    if request_submitted:
+                        success, message = create_reset_request(
+                            reset_email_value)
+                        if success:
+                            st.session_state.auth_notice = message
+                            st.success(
+                                "Reset code generated. Use it in the next tab.")
+                        else:
+                            st.error(message)
+            with reset_tab:
+                with st.form("reset_password_form", clear_on_submit=True):
+                    reset_email_confirm = st.text_input(
+                        "Email", key="reset_email_confirm")
+                    reset_code = st.text_input("Reset Code", key="reset_code")
+                    new_password = st.text_input(
+                        "New Password", type="password", key="new_password")
+                    confirm_new_password = st.text_input(
+                        "Confirm New Password", type="password", key="confirm_new_password")
+                    reset_submitted = st.form_submit_button(
+                        "Reset Password", use_container_width=True)
+                    if reset_submitted:
+                        success, message = reset_password(
+                            reset_email_confirm,
+                            reset_code,
+                            new_password,
+                            confirm_new_password,
+                        )
+                        if success:
+                            st.session_state.auth_mode = "login"
+                            st.session_state.auth_notice = None
+                            st.success(message)
+                        else:
+                            st.error(message)
 
 
 # ---- Financial Data Parser ----
@@ -716,18 +1279,25 @@ if not api_key:
     st.info("🔑 Please add your MISTRAL_API_KEY in Secrets or enter it in the sidebar.")
     st.stop()
 
+service_ready, service_status_message = build_service_status(api_key)
+
 # Initialize Mistral client
-client = Mistral(api_key=api_key)
-MODEL = "mistral-large-latest"
-SYSTEM_PROMPT = """You are a helpful financial advisor assistant.
-Provide advice on budgeting, investing, savings, and personal finance.
-Keep answers clear and practical. Always mention this is educational, not professional financial advice."""
+MODEL = DEFAULT_MODEL
+SYSTEM_PROMPT = DEFAULT_SYSTEM_PROMPT
+client, service_ready, service_status_message, migration_notice = bootstrap_runtime(
+    api_key)
 
 # ---- Initialize Session State ----
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-if "queued_prompt" not in st.session_state:
-    st.session_state.queued_prompt = None
+initialize_session_state()
+if migration_notice and not st.session_state.auth_notice:
+    st.session_state.auth_notice = migration_notice
+
+if not st.session_state.authenticated:
+    render_auth_screen()
+    with st.sidebar:
+        st.header("Access")
+        st.caption("Create an account or log in before starting a conversation.")
+    st.stop()
 
 # ---- UI ----
 visible_messages = len(
@@ -774,9 +1344,11 @@ st.markdown(
                 </div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Live conversation</div>
-                <div class="stat-value">{visible_messages}</div>
-                <div class="stat-copy">Insights exchanged so far, with practical guidance tailored to your next money move.</div>
+                <div>
+                    <div class="stat-label">Live conversation</div>
+                    <div class="stat-value">{visible_messages}</div>
+                    <div class="stat-copy hero-panel-copy">Insights exchanged so far, with practical guidance tailored to your next money move.</div>
+                </div>
             </div>
         </div>
     </section>
@@ -795,18 +1367,20 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 hero_action_col_left, hero_action_col_right = st.columns([1.55, 1])
 with hero_action_col_right:
+    st.markdown('<div class="hero-panel-actions">', unsafe_allow_html=True)
     if st.button("Start Live Conversation", key="hero_live_conversation", use_container_width=True):
         st.session_state.queued_prompt = "Help me build a practical personal finance plan based on my income, expenses, savings, and debt."
         st.rerun()
-
-st.markdown('<div class="market-button-row">', unsafe_allow_html=True)
-market_cols = st.columns(3)
-for index, (label, prompt) in enumerate(market_labels):
-    with market_cols[index]:
-        if st.button(label, key=f"market_{index}", use_container_width=True):
-            st.session_state.queued_prompt = prompt
-            st.rerun()
-st.markdown('</div>', unsafe_allow_html=True)
+    if st.button("Emergency Fund", key="hero_emergency_fund", use_container_width=True):
+        st.session_state.queued_prompt = "Help me build an emergency fund plan for 3 to 6 months of expenses."
+        st.rerun()
+    if st.button("Debt Strategy", key="hero_debt_strategy", use_container_width=True):
+        st.session_state.queued_prompt = "Compare debt snowball versus debt avalanche for my situation."
+        st.rerun()
+    if st.button("Investing Basics", key="hero_investing_basics", use_container_width=True):
+        st.session_state.queued_prompt = "Explain investing risk in simple language and how I should think about it."
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="section-lead">What this studio does best</div>',
             unsafe_allow_html=True)
@@ -854,30 +1428,26 @@ if user_msg:
     user_msg = normalize_text(user_msg)
 
     # Add user message to history
-    st.session_state.messages.append({"role": "user", "content": user_msg})
+    st.session_state.messages = append_message(
+        st.session_state.messages, "user", user_msg)
     with st.chat_message("user"):
         st.markdown(user_msg)
 
     # ---- Call Mistral API ----
-    try:
+    if not service_ready:
+        bot_reply = (
+            "The live AI service is not available right now. "
+            f"Reason: {service_status_message}. "
+            "Please fix the connection or API key and try again."
+        )
+    else:
         with st.spinner("Thinking..."):
-            resp = client.chat.complete(
-                model=MODEL,
-                messages=[
-                    {"role": m["role"],
-                        "content": normalize_text(m["content"])}
-                    for m in st.session_state.messages
-                ],
-                temperature=0.7,
-                max_tokens=500,
-            )
-            bot_reply = normalize_text(resp.choices[0].message.content)
-    except Exception as e:
-        bot_reply = f"⚠️ Error: {normalize_text(str(e))}"
+            bot_reply = generate_assistant_reply(
+                client, st.session_state.messages)
 
     # Add assistant response to history
-    st.session_state.messages.append(
-        {"role": "assistant", "content": bot_reply})
+    st.session_state.messages = append_message(
+        st.session_state.messages, "assistant", bot_reply)
     with st.chat_message("assistant"):
         st.markdown(bot_reply)
 
@@ -887,8 +1457,26 @@ with st.sidebar:
     st.caption(
         "Tune the experience and keep your financial conversations focused.")
 
+    if service_ready:
+        st.success("AI service status: ready")
+    else:
+        st.warning(f"AI service status: {service_status_message}")
+
+    if st.session_state.current_user:
+        st.markdown(
+            f"**Signed in as:** {st.session_state.current_user['name']}")
+        st.caption(st.session_state.current_user["email"])
+        st.caption(
+            f"Status: {'Verified' if st.session_state.current_user.get('is_verified') else 'Pending verification'}")
+
+    if st.button("Log Out", use_container_width=True):
+        logout_user()
+        st.rerun()
+
+    st.divider()
+
     if st.button("🗑️ Clear Chat History", use_container_width=True):
-        st.session_state.clear()
+        reset_chat_state()
         st.rerun()
 
     st.divider()

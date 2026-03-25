@@ -5,6 +5,11 @@ A Streamlit-based financial advisor chatbot powered by Mistral AI. Get personali
 ## Features
 
 - 💬 Interactive chat interface powered by Mistral AI
+- 🔐 Local login and sign up with hashed password storage
+- ✉️ Local email verification flow before first login
+- 🔁 Password reset flow using one-time local reset codes
+- 🛡️ API retries and timeout handling for more reliable responses
+- 🌐 Service readiness checks for API key format and Mistral connectivity
 - 📊 Real-time financial guidance
 - 💾 Persistent chat history during session
 - 🎨 Clean, modern UI with financial theme
@@ -60,10 +65,11 @@ The app will open in your browser at `http://localhost:8501`
 
 ## Usage
 
-1. Enter your financial questions in the chat input box
-2. The bot will provide educational financial advice
-3. Clear chat history using the sidebar button
-4. View message count in the sidebar
+1. Create an account from the app home screen
+2. Copy the local verification code shown by the app and verify the email in the Verify Email section
+3. Sign in and enter your financial questions in the chat input box
+4. Use Reset Password if you need a one-time reset code
+5. Clear chat history or log out using the sidebar
 
 ## Project Structure
 
@@ -71,6 +77,7 @@ The app will open in your browser at `http://localhost:8501`
 financeapp/
 ├── finaapp_py.py           # Main Streamlit application
 ├── requirements.txt        # Python dependencies
+├── users.db                # Local SQLite auth database created at runtime
 ├── .env.example           # Environment variables template
 ├── .gitignore             # Git ignore rules
 ├── .streamlit/config.toml # Streamlit configuration
@@ -100,6 +107,23 @@ This chatbot provides educational information about personal finance. It is not 
 ### API Key Not Found
 - Ensure environment variable is set: `echo $MISTRAL_API_KEY`
 - Or add the key via Streamlit secrets
+
+### Invalid API Key or Connectivity Problems
+- The app validates obvious API key formatting problems before sending requests
+- The sidebar shows live AI service readiness based on API key checks and Mistral connectivity
+- If Mistral is unreachable, the app avoids hanging requests and shows a clear offline message
+
+### Slow or Failed AI Responses
+- The app retries transient Mistral failures automatically
+- Requests use a timeout to avoid hanging too long on slow upstream responses
+- If the model is unavailable, the app shows a friendly retry message instead of a raw exception
+
+### Login Issues
+- New accounts are stored locally in `users.db`
+- New accounts must be verified before first sign-in
+- Verification and reset codes are displayed only inside the local app UI
+- Passwords must be at least 8 characters long
+- Existing `users.json` accounts are migrated automatically into `users.db` on startup when possible
 
 ### Import Errors
 ```bash
