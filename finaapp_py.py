@@ -504,6 +504,70 @@ st.markdown(
         background: rgba(219, 109, 87, 0.3) !important;
     }
 
+    .profile-card {
+        display: flex;
+        align-items: center;
+        gap: 0.8rem;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 18px;
+        padding: 0.85rem 1rem;
+        margin-bottom: 0.6rem;
+    }
+
+    .profile-avatar {
+        width: 44px;
+        height: 44px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #d9a441, #db6d57);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 800;
+        font-size: 1rem;
+        color: #fff;
+        flex-shrink: 0;
+    }
+
+    .profile-name {
+        font-weight: 700;
+        font-size: 0.9rem;
+        color: #fff;
+    }
+
+    .profile-email {
+        font-size: 0.75rem;
+        color: rgba(238, 244, 239, 0.6);
+        word-break: break-all;
+    }
+
+    .profile-badge {
+        display: inline-block;
+        margin-top: 0.25rem;
+        font-size: 0.68rem;
+        padding: 0.15rem 0.55rem;
+        border-radius: 99px;
+        background: rgba(99, 186, 168, 0.2);
+        color: #63baa8;
+        border: 1px solid rgba(99, 186, 168, 0.35);
+    }
+
+    .profile-badge.unverified {
+        background: rgba(217, 164, 65, 0.15);
+        color: #d9a441;
+        border-color: rgba(217, 164, 65, 0.3);
+    }
+
+    .logout-btn > div > button {
+        background: rgba(219, 109, 87, 0.18) !important;
+        border-color: rgba(219, 109, 87, 0.4) !important;
+        color: #f5a08f !important;
+    }
+
+    .logout-btn > div > button:hover {
+        background: rgba(219, 109, 87, 0.42) !important;
+    }
+
     @media (max-width: 900px) {
         .hero-grid,
         .feature-band,
@@ -1463,15 +1527,56 @@ with st.sidebar:
         st.warning(f"AI service status: {service_status_message}")
 
     if st.session_state.current_user:
+        _u = st.session_state.current_user
+        _initials = "".join(p[0].upper()
+                            for p in _u["name"].split()[:2]) or "?"
+        _badge_cls = "profile-badge" if _u.get(
+            "is_verified") else "profile-badge unverified"
+        _badge_txt = "✓ Verified" if _u.get("is_verified") else "⏳ Pending"
         st.markdown(
-            f"**Signed in as:** {st.session_state.current_user['name']}")
-        st.caption(st.session_state.current_user["email"])
-        st.caption(
-            f"Status: {'Verified' if st.session_state.current_user.get('is_verified') else 'Pending verification'}")
+            f"""
+            <div class="profile-card">
+                <div class="profile-avatar">{_initials}</div>
+                <div>
+                    <div class="profile-name">{_u['name']}</div>
+                    <div class="profile-email">{_u['email']}</div>
+                    <span class="{_badge_cls}">{_badge_txt}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    if st.button("Log Out", use_container_width=True):
-        logout_user()
-        st.rerun()
+        with st.expander("👤 Account Settings"):
+            st.caption("Change your password")
+            _old_pw = st.text_input(
+                "Current password", type="password", key="acct_old_pw")
+            _new_pw = st.text_input(
+                "New password", type="password", key="acct_new_pw")
+            _conf_pw = st.text_input(
+                "Confirm new password", type="password", key="acct_conf_pw")
+            if st.button("Update Password", use_container_width=True, key="acct_update_pw"):
+                if not _old_pw or not _new_pw or not _conf_pw:
+                    st.error("Please fill in all fields.")
+                elif _new_pw != _conf_pw:
+                    st.error("New passwords do not match.")
+                elif len(_new_pw) < 8:
+                    st.error("Password must be at least 8 characters.")
+                else:
+                    _db_user = fetch_user(_u["email"])
+                    if _db_user and _db_user["password_hash"] == hash_password(_old_pw, _db_user["salt"]):
+                        _new_salt = os.urandom(16).hex()
+                        update_user_password(
+                            _u["email"], _new_salt, hash_password(_new_pw, _new_salt))
+                        st.success("Password updated successfully.")
+                    else:
+                        st.error("Current password is incorrect.")
+
+        st.markdown('<div class="logout-btn">', unsafe_allow_html=True)
+        if st.button("🚪 Log Out", use_container_width=True, key="sidebar_logout"):
+            logout_user()
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
     st.divider()
 
