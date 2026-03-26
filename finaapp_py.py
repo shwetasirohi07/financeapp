@@ -1088,9 +1088,10 @@ def render_auth_screen() -> None:
                     name, email, password, confirm_password)
                 if success:
                     st.session_state.auth_mode = "login"
-                    st.session_state.auth_notice = message
+                    st.session_state.auth_notice = None
                     st.success(
-                        "Account created. Complete email verification below.")
+                        "Account created! You can sign in now.")
+                    st.rerun()
                 else:
                     st.error(message)
 
