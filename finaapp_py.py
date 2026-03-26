@@ -376,15 +376,26 @@ st.markdown(
     }
 
     .feature-button-row .stButton > button {
-        min-height: 128px;
-        border-radius: 24px;
+        width: 200px !important;
+        height: 200px !important;
+        min-height: 200px !important;
+        border-radius: 50% !important;
         border: 1px solid var(--line);
-        background: var(--bg-card);
-        color: var(--ink-blue);
-        font-weight: 800;
-        line-height: 1.45;
+        background: var(--gold) !important;
+        color: var(--text-main) !important;
+        font-weight: 700;
+        font-size: 0.78rem !important;
+        line-height: 1.35;
         box-shadow: 0 16px 32px rgba(55, 72, 88, 0.08);
         white-space: normal;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        padding: 1.8rem 1.2rem !important;
+        display: flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        text-align: center;
+        margin: 0 auto;
     }
 
     div[data-testid="column"] .stButton > button {
@@ -1397,11 +1408,11 @@ market_labels = [
 ]
 
 feature_labels = [
-    ("Budget With Intention\nTurn vague spending habits into clear monthly priorities and realistic tradeoffs.",
+    ("Budget With Intention\nClear monthly priorities and realistic tradeoffs.",
      "Build me a budget that prioritizes essentials, savings, and realistic discretionary spending."),
-    ("Invest Without Noise\nGet grounded explanations of risk, diversification, and long-term planning in plain language.",
+    ("Invest Without Noise\nRisk, diversification, and planning in plain language.",
      "Teach me a calm, long-term investing approach with diversification and risk basics."),
-    ("Save For Real Life\nMap out emergency funds, debt reduction, and milestone savings with a calmer roadmap.",
+    ("Save For Real Life\nEmergency funds, debt reduction, and milestone savings.",
      "Help me create a savings roadmap for emergencies, debt reduction, and personal milestones."),
 ]
 
