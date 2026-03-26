@@ -584,8 +584,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-USER_DB_PATH = Path("users.db")
-LEGACY_USER_DB_PATH = Path("users.json")
+BASE_DIR = Path(__file__).resolve().parent
+USER_DB_PATH = BASE_DIR / "users.db"
+LEGACY_USER_DB_PATH = BASE_DIR / "users.json"
 DEFAULT_MODEL = "mistral-large-latest"
 DEFAULT_SYSTEM_PROMPT = """You are a helpful financial advisor assistant.
 Provide advice on budgeting, investing, savings, and personal finance.
@@ -595,6 +596,15 @@ Keep answers clear and practical. Always mention this is educational, not profes
 def hash_password(password: str, salt: str) -> str:
     """Create a deterministic password hash using SHA-256 and a per-user salt."""
     return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def normalize_text(value: object) -> str:
+    """Return display-safe text with normalized unicode and trimmed whitespace."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    return unicodedata.normalize("NFKC", value).replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 @st.cache_resource(show_spinner=False)

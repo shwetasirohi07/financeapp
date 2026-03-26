@@ -102,3 +102,85 @@ def test_reset_password_updates_hash(tmp_path, monkeypatch):
     assert user is not None
     assert user["password_hash"] != app.hash_password("oldpassword", "oldsalt")
     assert user["reset_code"] is None
+
+
+def test_login_requires_existing_account(tmp_path, monkeypatch):
+    setup_test_storage(tmp_path, monkeypatch)
+
+    success, message = app.login_user("missing@example.com", "password123")
+
+    assert success is False
+    assert "no account found" in message.lower()
+
+
+def test_login_requires_verified_account(tmp_path, monkeypatch):
+    setup_test_storage(tmp_path, monkeypatch)
+    app.create_user_record(
+        "newuser@example.com",
+        "New User",
+        "saltxyz",
+        app.hash_password("password123", "saltxyz"),
+        "111111",
+    )
+
+    success, message = app.login_user("newuser@example.com", "password123")
+
+    assert success is False
+    assert "not verified" in message.lower()
+
+
+def test_login_rejects_wrong_password(tmp_path, monkeypatch):
+    setup_test_storage(tmp_path, monkeypatch)
+    app.create_user_record(
+        "verified@example.com",
+        "Verified User",
+        "saltabc",
+        app.hash_password("rightpassword", "saltabc"),
+        "222222",
+    )
+    app.update_user_codes("verified@example.com",
+                          verification_code="", is_verified=True)
+
+    success, message = app.login_user("verified@example.com", "wrongpassword")
+
+    assert success is False
+    assert "incorrect password" in message.lower()
+
+
+def test_login_accepts_trimmed_case_insensitive_email(tmp_path, monkeypatch):
+    setup_test_storage(tmp_path, monkeypatch)
+    app.create_user_record(
+        "casecheck@example.com",
+        "Case Check",
+        "saltcase",
+        app.hash_password("password123", "saltcase"),
+        "333333",
+    )
+    app.update_user_codes("casecheck@example.com",
+                          verification_code="", is_verified=True)
+
+    success, message = app.login_user(
+        "  CaseCheck@Example.com  ", "password123")
+
+    assert success is True
+    assert "welcome back" in message.lower()
+
+
+def test_signup_rejects_duplicate_email_case_insensitive(tmp_path, monkeypatch):
+    setup_test_storage(tmp_path, monkeypatch)
+    first_success, _ = app.signup_user(
+        "Dup User",
+        "dup@example.com",
+        "password123",
+        "password123",
+    )
+    second_success, second_message = app.signup_user(
+        "Dup User 2",
+        "DUP@example.com",
+        "password456",
+        "password456",
+    )
+
+    assert first_success is True
+    assert second_success is False
+    assert "already exists" in second_message.lower()
