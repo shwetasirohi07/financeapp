@@ -9,6 +9,7 @@ import unicodedata
 from pathlib import Path
 from typing import Callable
 
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 from mistralai.client import Mistral
@@ -1481,6 +1482,51 @@ for _i, _prompt_text in enumerate(_STARTER_PROMPTS):
         if st.button(_prompt_text, key=f"chip_{_i}", use_container_width=True):
             st.session_state.queued_prompt = _prompt_text
             st.rerun()
+
+# ---- Finance Visual Snapshot (static illustrative charts) ----
+st.markdown('<div class="section-lead">Finance Visual Snapshot</div>',
+            unsafe_allow_html=True)
+
+_kpi1, _kpi2, _kpi3 = st.columns(3)
+_kpi1.metric("Net Worth", "$148,200", "+3.2%")
+_kpi2.metric("Monthly Savings", "$1,250", "+$180")
+_kpi3.metric("Debt Ratio", "24%", "-2%")
+
+_chart_left, _chart_right = st.columns([1.1, 1])
+
+with _chart_left:
+    st.markdown("**Savings Growth (12 Months)**")
+    _growth_df = pd.DataFrame(
+        {
+            "Month": ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+            "Savings ($)": [5000, 5600, 6200, 6900, 7600, 8500,
+                            9400, 10300, 11400, 12600, 13900, 15300],
+        }
+    ).set_index("Month")
+    st.line_chart(_growth_df, use_container_width=True)
+
+with _chart_right:
+    st.markdown("**Portfolio Allocation**")
+    _alloc_df = pd.DataFrame(
+        {
+            "Category": ["Equity", "Debt", "Emergency", "Gold", "Cash"],
+            "Percent": [45, 22, 15, 10, 8],
+        }
+    ).set_index("Category")
+    st.bar_chart(_alloc_df, use_container_width=True)
+
+st.markdown("**Income vs Expenses**")
+_inc_exp = pd.DataFrame(
+    {
+        "Month": ["Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+        "Income": [4200, 4300, 4250, 4400, 4500, 4600],
+        "Expenses": [3100, 3050, 3200, 3150, 3250, 3300],
+    }
+).set_index("Month")
+st.bar_chart(_inc_exp, use_container_width=True)
+
+st.divider()
 
 # ---- Financial Snapshot (auto-updates as you chat) ----
 render_snapshot()
