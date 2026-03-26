@@ -977,7 +977,8 @@ def signup_user(name: str, email: str, password: str, confirm_password: str) -> 
         hash_password(password, salt),
         verification_code,
     )
-    return True, f"Account created. Verify email with code for {mask_email(clean_email)}: {verification_code}"
+    update_user_codes(clean_email, verification_code="", is_verified=True)
+    return True, "Account created and verified. You can sign in now."
 
 
 def login_user(email: str, password: str) -> tuple[bool, str]:

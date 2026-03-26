@@ -42,12 +42,12 @@ def test_signup_and_fetch_user(tmp_path, monkeypatch):
     )
 
     assert success is True
-    assert "verify email" in message.lower()
+    assert "account created" in message.lower()
 
     user = app.fetch_user("test@example.com")
     assert user is not None
     assert user["name"] == "Test User"
-    assert user["is_verified"] is False
+    assert user["is_verified"] is True
 
 
 def test_legacy_user_migration(tmp_path, monkeypatch):
